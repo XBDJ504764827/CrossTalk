@@ -65,7 +65,7 @@ STRICT=1 ./build.sh  # 警告即错误（CI 用）
 | ConVar | 默认 | 说明 |
 |--------|------|------|
 | `cross_talk_enabled` | 1 | 总开关 |
-| `cross_talk_db_path` | `file:addons/sourcemod/data/crosstalk/shared.sq3` | 共享 SQLite 路径（所有服必须同一文件） |
+| `cross_talk_db_path` | (空) | 共享 SQLite 路径（留空=自动 `addons/sourcemod/data/crosstalk/shared.sq3`；所有服必须同一文件） |
 | `cross_talk_server_id` | (hostname) | 服务器标识（消息来源/去重） |
 | `cross_talk_poll_interval` | 0.5 | 轮询间隔（秒） |
 | `cross_talk_announce_flag` | b | 喊话权限位 |

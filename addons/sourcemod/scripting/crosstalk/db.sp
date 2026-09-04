@@ -20,7 +20,6 @@
 #define CT_MSG_TYPE_ANNOUNCE 1  // 管理员喊话
 
 #define CT_DB_MAX_QUERY_ROWS 100  // 每轮询最多读取消息数
-#define CT_DB_PATH_DEFAULT "file:addons/sourcemod/data/crosstalk/shared.sq3"  // 运行时替换为完整绝对路径
 
 // =====[ STATE ]=====
 
@@ -30,13 +29,75 @@ int gI_LastReadId;      // 本服已读的最大消息 id
 bool gB_Polling;        // 防止轮询重入
 bool gB_CleanupPending; // 清理标记
 
-// 将 SQLite URI 补全为"绝对可共享路径"（服务器根目录下 addons/sourcemod/data/...）
-void CT_BuildDefaultDbPath(char[] buffer, int maxlength)
+// =====[ PATH / DIRECTORY HELPERS ]=====
+
+// 确保数据库文件的父目录存在（SQLite 不会自动创建目录；数据库文件不存在时会自动创建）
+bool CT_EnsureDirectory(const char[] path)
 {
-	// BuildPath(Path_SM, ...) 得到 <SM>/... 绝对路径，统一 file: 前缀
-	char smPath[PLATFORM_MAX_PATH];
-	BuildPath(Path_SM, smPath, sizeof(smPath), "data/crosstalk/shared.sq3");
-	Format(buffer, maxlength, "file:%s", smPath);
+	char dirPath[PLATFORM_MAX_PATH];
+	strcopy(dirPath, sizeof(dirPath), path);
+
+	// 去掉文件名，只保留目录部分
+	int lastSlash = FindCharInString(dirPath, '/', true);
+	int lastBack = FindCharInString(dirPath, '\\', true);
+	if (lastBack > lastSlash)
+	{
+		lastSlash = lastBack;
+	}
+	if (lastSlash <= 0)
+	{
+		return true; // 无目录部分（相对当前目录），无需创建
+	}
+	dirPath[lastSlash] = '\0';
+
+	if (DirExists(dirPath))
+	{
+		return true;
+	}
+
+	// CreateDirectory 只创建一级，逐级创建
+	char partial[PLATFORM_MAX_PATH];
+	partial[0] = '\0';
+	int len = strlen(dirPath);
+	for (int i = 0; i < len; i++)
+	{
+		partial[i] = dirPath[i];
+		partial[i + 1] = '\0';
+		if (dirPath[i] == '/' || dirPath[i] == '\\' || i == len - 1)
+		{
+			if (partial[0] == '\0' || StrEqual(partial, "/") || StrEqual(partial, "\\"))
+			{
+				continue;
+			}
+			if (!DirExists(partial) && !CreateDirectory(partial, 0755))
+			{
+				LogError("[CrossTalk] Could not create directory: %s", partial);
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+// URL 编码文件路径中的 SQLite URI 保留字符（空格→%20, ?→%3f, #→%23, %→%25）
+void CT_URLEncodePath(const char[] input, char[] output, int maxlength)
+{
+	int outIndex;
+	int len = strlen(input);
+	for (int i = 0; i < len && outIndex < maxlength - 4; i++)
+	{
+		char c = input[i];
+		if (c == ' ' || c == '?' || c == '#' || c == '%')
+		{
+			FormatEx(output[outIndex], maxlength - outIndex, "%%%02X", c);
+			outIndex += 3;
+		}
+		else
+		{
+			output[outIndex++] = c;
+		}
+	}
+	output[outIndex] = '\0';
 }
 
 // =====[ PUBLIC ]=====
@@ -56,29 +117,57 @@ void CT_DB_Init()
 	{
 		gCV_DbPath.GetString(dbPath, sizeof(dbPath));
 	}
+	TrimString(dbPath);
 
-	char resolvedDbPath[512];
-	char smPath[PLATFORM_MAX_PATH];
-
+	// ===== 解析为文件系统路径（绝对路径，无 file: 前缀）=====
+	// 规则（Path_SM = <游戏根>/addons/sourcemod/，CS:GO 下即 csgo/addons/sourcemod/）：
+	//   空                → <SM>/data/crosstalk/shared.sq3（默认共享，即 csgo/addons/sourcemod/data/crosstalk/）
+	//   file:/绝对路径    → 直接使用
+	//   file:相对路径     → 相对 <SM> 解析
+	//   普通相对路径      → 相对 <SM> 解析
+	char filePath[PLATFORM_MAX_PATH];
 	if (dbPath[0] == '\0')
 	{
-		// 空 → 默认共享 DB（BuildPath 绝对路径，跨服在共享目录默认即互通）
-		CT_BuildDefaultDbPath(resolvedDbPath, sizeof(resolvedDbPath));
+		// 默认零配置：csgo/addons/sourcemod/data/crosstalk/shared.sq3
+		// 多个服务器共享同一 addons/sourcemod/data/ 目录时天然互通
+		BuildPath(Path_SM, filePath, sizeof(filePath), "data/crosstalk/shared.sq3");
 	}
 	else if (strncmp(dbPath, "file:", 5) == 0)
 	{
-		// file: 形式：直接使用（支持绝对路径或相对 SM 目录）
-		strcopy(resolvedDbPath, sizeof(resolvedDbPath), dbPath);
+		if (dbPath[5] == '/')
+		{
+			// 绝对 URI file:/xxx/xxx.sq3
+			strcopy(filePath, sizeof(filePath), dbPath[5]);
+		}
+		else
+		{
+			// 相对 URI file:addons/...  → 相对 <SM> 解析
+			BuildPath(Path_SM, filePath, sizeof(filePath), "%s", dbPath[5]);
+		}
 	}
 	else
 	{
-		// 相对路径（相对 SM 根目录）：补全为绝对 URI
-		BuildPath(Path_SM, smPath, sizeof(smPath), "%s", dbPath);
-		Format(resolvedDbPath, sizeof(resolvedDbPath), "file:%s", smPath);
+		// 普通相对路径 → 相对 <SM> 解析
+		BuildPath(Path_SM, filePath, sizeof(filePath), "%s", dbPath);
 	}
 
-	kv.SetString("database", resolvedDbPath);
-	CT_LogDebug("DB path: %s", resolvedDbPath);
+	// ===== 确保目录存在（SQLite 只创建文件，不创建目录）=====
+	// 数据库文件本身：不存在 → SQLite 自动创建；已存在 → 不覆盖（符合要求）
+	if (!CT_EnsureDirectory(filePath))
+	{
+		LogError("[CrossTalk] Could not prepare database directory for: %s", filePath);
+		delete kv;
+		return;
+	}
+
+	// ===== 构建 SQLite URI（file: + URL 编码绝对路径）=====
+	char encoded[PLATFORM_MAX_PATH];
+	CT_URLEncodePath(filePath, encoded, sizeof(encoded));
+	char uri[PLATFORM_MAX_PATH + 8];
+	Format(uri, sizeof(uri), "file:%s", encoded);
+
+	kv.SetString("database", uri);
+	CT_LogDebug("DB path: %s", uri);
 
 	gH_DB = SQL_ConnectCustom(kv, error, sizeof(error), true);
 	delete kv;

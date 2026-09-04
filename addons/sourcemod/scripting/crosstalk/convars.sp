@@ -46,9 +46,8 @@ void CT_CreateConVars()
 
 	gCV_Enabled = CreateConVar("cross_talk_enabled", "1",
 		"总开关：是否启用跨服聊天功能（0=完全禁用，含接收与渲染）。", _, true, 0.0, true, 1.0);
-	gCV_DbPath = CreateConVar("cross_talk_db_path",
-		"file:addons/sourcemod/data/crosstalk/shared.sq3",
-		"共享 SQLite 数据库路径（SQLite URI 或相对 SM 根目录路径，所有服务器必须指向同一个文件才能互通。默认 file:addons/sourcemod/data/crosstalk/shared.sq3 相对服务器根目录解析。绝对路径示例：file:/home/steam/shared/crosstalk.sq3）");
+	gCV_DbPath = CreateConVar("cross_talk_db_path", "",
+		"共享 SQLite 数据库路径（留空 = 自动使用 <SM>/data/crosstalk/shared.sq3，所有服务器共享同一 data/ 目录时零配置互通。支持 file:/绝对路径/xxx.sq3 或相对游戏根目录路径；所有服务器必须指向同一个文件才能互通）。");
 	gCV_ServerId = CreateConVar("cross_talk_server_id", "",
 		"服务器标识（用于消息来源与去重）。留空则自动使用 hostname 值。");
 	gCV_PollInterval = CreateConVar("cross_talk_poll_interval", "0.5",
