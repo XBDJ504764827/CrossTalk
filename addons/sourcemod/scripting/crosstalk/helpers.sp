@@ -90,9 +90,15 @@ void CT_SanitizeMessage(const char[] input, char[] output, int maxlength)
 }
 
 // 消息是否以命令触发字符开头（'!' 或 '/'），命令不跨服转发
+// 兼容前导空白（"! ssp"、"  /help" 等视为命令）
 bool CT_IsCommand(const char[] message)
 {
-	return message[0] == '!' || message[0] == '/';
+	int i = 0;
+	while (message[i] == ' ' || message[i] == '\t')
+	{
+		i++;
+	}
+	return message[i] == '!' || message[i] == '/';
 }
 
 // 是否空消息
