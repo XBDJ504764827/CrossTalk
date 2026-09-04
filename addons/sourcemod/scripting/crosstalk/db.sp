@@ -87,27 +87,6 @@ void CT_NormalizeDbName(const char[] dbPath, char[] output, int maxlength)
 	strcopy(output, maxlength, dbPath);
 }
 
-// 将"相对 SM 的路径"规范化为 Path_SM 下的绝对路径。
-// 旧版本 cfg 可能残留 "addons/sourcemod/data/..." 前缀（Path_SM 本身已是
-// <游戏根>/addons/sourcemod/），避免双重嵌套：剥离该前缀后再拼接。
-// 输入示例: "addons/sourcemod/data/crosstalk/shared.sq3" → <SM>/data/crosstalk/shared.sq3
-//          "data/crosstalk/shared.sq3"     → <SM>/data/crosstalk/shared.sq3
-void CT_ResolveRelativeToSm(const char[] relPath, char[] output, int maxlength)
-{
-	int start = 0;
-	if (strncmp(relPath, "addons/sourcemod/", 17) == 0)
-	{
-		start = 17; // 剥离开头重复的 addons/sourcemod/
-	}
-	BuildPath(Path_SM, output, maxlength, "%s", relPath[start]);
-}
-
-// 判断路径是否为绝对路径（以 / 开头）
-bool CT_IsAbsolutePath(const char[] path)
-{
-	return path[0] == '/';
-}
-
 // =====[ PUBLIC ]=====
 
 void CT_DB_Init()
