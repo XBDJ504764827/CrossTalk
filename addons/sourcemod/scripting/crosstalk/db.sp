@@ -38,6 +38,7 @@ bool gB_DBReady;
 int gI_LastReadId;      // 本服已读的最大消息 id
 bool gB_Polling;        // 防止轮询重入
 bool gB_CleanupPending; // 清理标记
+char gC_DbName[512];    // 规范化后的 database 名（供目录自建/诊断使用）
 
 // =====[ PATH / DIRECTORY HELPERS ]=====
 
@@ -87,6 +88,60 @@ void CT_NormalizeDbName(const char[] dbPath, char[] output, int maxlength)
 	strcopy(output, maxlength, dbPath);
 }
 
+// 连接前确保父目录存在：CreateFolder 遇到任意错误（含已存在、无写权限）都返回
+// false，驱动据此 break 掉逐级建目录循环 → data/sqlite/crosstalk 缺失时
+// sqlite3_open 直接失败，之后每次写入都会报 "DB not ready, dropping message"。
+// 这里用 DirExists 先行检查规避该缺陷；目录权限 = 0755 & ~umask。
+// 注意：插件以 csgoserver 用户运行时，若其 umask 为 0077，新建目录会继承
+// 0077 权限（如 d-wxrw---t 所示的旧目录），其他账号（如 FTP 管理面板）将无法
+// 进入；需要放宽时先修 umask 或手动 chmod。
+static void CT_EnsureDbDir()
+{
+	char rel[PLATFORM_MAX_PATH];
+
+	// dbName = "crosstalk/shared" → Path_SM 下 data/sqlite/crosstalk/
+	if (strncmp(gC_DbName, "file:", 5) == 0)
+	{
+		// file: URI：用户负责目录存在（与 convar 描述一致），不做处理
+		return;
+	}
+	BuildPath(Path_SM, rel, sizeof(rel), "data/sqlite/%s", gC_DbName);
+	// 去掉文件名，保留目录部分
+	int last = FindCharInString(rel, '/', true);
+	if (last <= 0)
+	{
+		return;
+	}
+	rel[last] = '\0';
+	if (DirExists(rel))
+	{
+		return;
+	}
+
+	// 逐级创建（CreateDirectory 一次只建一级）
+	char partial[PLATFORM_MAX_PATH];
+	int len = strlen(rel);
+	for (int i = 1; i < len; i++)
+	{
+		if (rel[i] != '/' || i + 1 > len)
+		{
+			continue;
+		}
+		strcopy(partial, i + 1, rel);
+		if (!DirExists(partial) && !CreateDirectory(partial, 0755))
+		{
+			LogError("[CrossTalk] Could not create directory: %s", partial);
+			return;
+		}
+	}
+	if (!DirExists(rel) && !CreateDirectory(rel, 0755))
+	{
+		LogError("[CrossTalk] Could not create directory: %s", rel);
+		return;
+	}
+	CT_LogDebug("DB dir ensured: %s", rel);
+}
+
 // =====[ PUBLIC ]=====
 
 void CT_DB_Init()
@@ -112,6 +167,11 @@ void CT_DB_Init()
 	kv.SetString("database", dbName);
 	CT_LogDebug("DB name: %s", dbName);
 
+	// 驱动缺陷规避：其逐级建目录循环在 CreateFolder 失败时静默 break，
+	// 导致 data/sqlite/<db> 缺失时 sqlite3_open 直接失败。连接前先自建。
+	strcopy(gC_DbName, sizeof(gC_DbName), dbName);
+	CT_EnsureDbDir();
+
 	gH_DB = SQL_ConnectCustom(kv, error, sizeof(error), true);
 	delete kv;
 
@@ -121,6 +181,14 @@ void CT_DB_Init()
 		LogError("[CrossTalk] SQLite connect failed: %s", error);
 		LogError("[CrossTalk]   convar cross_talk_db_path='%s'", dbPath);
 		LogError("[CrossTalk]   normalized database='%s'", dbName);
+		{
+			char probe[PLATFORM_MAX_PATH];
+			BuildPath(Path_SM, probe, sizeof(probe), "data/sqlite/%s.sq3", dbName);
+			LogError("[CrossTalk]   target file='%s'", probe);
+			BuildPath(Path_SM, probe, sizeof(probe), "data/sqlite");
+			LogError("[CrossTalk]   data/sqlite dir exists=%d (missing/unreadable parent breaks connect; check owner & permissions)",
+				DirExists(probe));
+		}
 		LogError("[CrossTalk]   hint: leave cross_talk_db_path empty for default shared database");
 		return;
 	}
