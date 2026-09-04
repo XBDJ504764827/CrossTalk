@@ -133,6 +133,7 @@ static void CT_EnsureDbDir()
 			LogError("[CrossTalk] Could not create directory: %s", partial);
 			return;
 		}
+		return;
 	}
 	if (!DirExists(rel) && !CreateDirectory(rel, 0755))
 	{
