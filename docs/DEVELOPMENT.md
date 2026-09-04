@@ -122,16 +122,19 @@ CrossTalk/
 
 ### 4.1 路径解析
 
-SourceMod sqlite 驱动（`SqDriver::Connect`）对 `file:` 开头的 database 名**直接透传**（不拼 `data/sqlite/`），支持绝对 URI：
+SourceMod sqlite 驱动（`SqDriver::Connect`）对 `file:` 开头的 database 名**直接透传**（不拼 `data/sqlite/`），支持绝对 URI。但**相对 `file:` URI 按进程 CWD 解析（不可控，会失败）**，因此插件统一解析为**绝对路径**：
 
 ```pawn
 // 默认（零配置）：BuildPath(Path_SM, "data/crosstalk/shared.sq3") → file:<绝对路径>
 // ConVar 覆盖：cross_talk_db_path "file:/home/steam/shared/crosstalk.sq3"
+//   - 空             → <SM>/data/crosstalk/shared.sq3（同机器共享 data/ 即互通）
+//   - file:/绝对路径  → 直接使用
+//   - file:相对/普通相对 → 相对 <SM> 根解析
 ```
 
-所有服务器指向同一物理文件即可互通。
+**目录自动创建**：SQLite 只自动创建数据库文件，**不创建目录**。`CT_EnsureDirectory` 在连接前逐级创建 `data/crosstalk/`；数据库文件不存在 → SQLite 自动创建；已存在 → 保留不覆盖。
 
-### 4.2 并发安全
+### 4.2 并发安全（保持不变）
 
 sqlite 驱动内置 `busy_handler`（100ms 重试等待），多进程并发写安全；消息吞吐低（每服 0.5s 一次 SELECT + 写入），远低于 SQLite 极限。无长事务。
 
