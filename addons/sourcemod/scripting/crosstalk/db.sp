@@ -100,6 +100,27 @@ void CT_URLEncodePath(const char[] input, char[] output, int maxlength)
 	output[outIndex] = '\0';
 }
 
+// 将"相对 SM 的路径"规范化为 Path_SM 下的绝对路径。
+// 旧版本 cfg 可能残留 "addons/sourcemod/data/..." 前缀（Path_SM 本身已是
+// <游戏根>/addons/sourcemod/），避免双重嵌套：剥离该前缀后再拼接。
+// 输入示例: "addons/sourcemod/data/crosstalk/shared.sq3" → <SM>/data/crosstalk/shared.sq3
+//          "data/crosstalk/shared.sq3"     → <SM>/data/crosstalk/shared.sq3
+void CT_ResolveRelativeToSm(const char[] relPath, char[] output, int maxlength)
+{
+	int start = 0;
+	if (strncmp(relPath, "addons/sourcemod/", 17) == 0)
+	{
+		start = 17; // 剥离开头重复的 addons/sourcemod/
+	}
+	BuildPath(Path_SM, output, maxlength, "%s", relPath[start]);
+}
+
+// 判断路径是否为绝对路径（以 / 开头）
+bool CT_IsAbsolutePath(const char[] path)
+{
+	return path[0] == '/';
+}
+
 // =====[ PUBLIC ]=====
 
 void CT_DB_Init()
@@ -123,8 +144,8 @@ void CT_DB_Init()
 	// 规则（Path_SM = <游戏根>/addons/sourcemod/，CS:GO 下即 csgo/addons/sourcemod/）：
 	//   空                → <SM>/data/crosstalk/shared.sq3（默认共享，即 csgo/addons/sourcemod/data/crosstalk/）
 	//   file:/绝对路径    → 直接使用
-	//   file:相对路径     → 相对 <SM> 解析
-	//   普通相对路径      → 相对 <SM> 解析
+	//   file:相对路径     → 相对 <SM> 解析，自动剥离重复的 addons/sourcemod/ 前缀
+	//   普通相对路径      → 相对 <SM> 解析，自动剥离重复的 addons/sourcemod/ 前缀
 	char filePath[PLATFORM_MAX_PATH];
 	if (dbPath[0] == '\0')
 	{
@@ -134,21 +155,21 @@ void CT_DB_Init()
 	}
 	else if (strncmp(dbPath, "file:", 5) == 0)
 	{
-		if (dbPath[5] == '/')
+		if (CT_IsAbsolutePath(dbPath[5]))
 		{
 			// 绝对 URI file:/xxx/xxx.sq3
 			strcopy(filePath, sizeof(filePath), dbPath[5]);
 		}
 		else
 		{
-			// 相对 URI file:addons/...  → 相对 <SM> 解析
-			BuildPath(Path_SM, filePath, sizeof(filePath), "%s", dbPath[5]);
+			// 相对 URI file:addons/...  → 相对 <SM> 解析（剥离重复前缀）
+			CT_ResolveRelativeToSm(dbPath[5], filePath, sizeof(filePath));
 		}
 	}
 	else
 	{
-		// 普通相对路径 → 相对 <SM> 解析
-		BuildPath(Path_SM, filePath, sizeof(filePath), "%s", dbPath);
+		// 普通相对路径 → 相对 <SM> 解析（剥离重复前缀）
+		CT_ResolveRelativeToSm(dbPath, filePath, sizeof(filePath));
 	}
 
 	// ===== 确保目录存在（SQLite 只创建文件，不创建目录）=====
@@ -174,7 +195,13 @@ void CT_DB_Init()
 
 	if (gH_DB == null)
 	{
+		// 详细失败日志：ConVar 原始值 + 解析后的绝对路径 + URI，便于排查
 		LogError("[CrossTalk] SQLite connect failed: %s", error);
+		LogError("[CrossTalk]   convar cross_talk_db_path='%s'", dbPath);
+		LogError("[CrossTalk]   resolved filePath='%s'", filePath);
+		LogError("[CrossTalk]   sqlite uri='%s'", uri);
+		LogError("[CrossTalk]   dirExists='%d' fileExists='%d'",
+			DirExists(filePath) ? 1 : 0, FileExists(filePath) ? 1 : 0);
 		return;
 	}
 
