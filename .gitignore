@@ -1,0 +1,32 @@
+# ===== 构建产物 =====
+*.smx
+*.smx.bak
+*.asm
+.sm111/
+.deps/
+dist/
+package/
+release-package/
+
+# ===== 服务器运行时数据（不提交） =====
+addons/sourcemod/data/
+addons/sourcemod/logs/
+addons/sourcemod/configs/
+addons/sourcemod/plugins/disabled/
+# cfg/sourcemod/crosstalk.cfg 为仓库内的配置模板（首次启动由 AutoExecConfig 生成）
+
+# ===== 测试生成物 =====
+test/
+
+# ===== 编辑器 / 系统文件 =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.zip
+
+# ===== 日志 =====
+*.log

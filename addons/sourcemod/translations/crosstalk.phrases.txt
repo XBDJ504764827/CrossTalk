@@ -1,0 +1,28 @@
+"Phrases"
+{
+	"CrossTalk Prefix"
+	{
+		"en"		"CrossTalk"
+		"zh"		"CrossTalk"
+	}
+	"Chat Enabled"
+	{
+		"en"		"Cross-server chat enabled: your messages are now visible on all servers."
+		"zh"		"跨服聊天已开启: 你的消息将显示在所有服务器。"
+	}
+	"Chat Disabled"
+	{
+		"en"		"Cross-server chat disabled: your messages are now local to this server."
+		"zh"		"跨服聊天已关闭: 你的消息将只保留在本服。"
+	}
+	"Usage CrAll"
+	{
+		"en"		"Usage: !crall <message>"
+		"zh"		"用法: !crall <消息内容>"
+	}
+	"No Permission"
+	{
+		"en"		"You do not have permission to use cross-server announce."
+		"zh"		"你没有权限使用跨服喊话。"
+	}
+}
