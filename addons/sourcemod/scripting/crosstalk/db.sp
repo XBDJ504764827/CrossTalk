@@ -14,14 +14,13 @@
 	  - 消息读多写少（每个服 0.5s 一次 SELECT），负载低
 
 	【重要：数据库连接方式（已从 sqlite 驱动源码确认）】
-	  SqDriver::Connect 对 database 名：
-	    - "file:xxx" 前缀 → 原样透传（不解析、不建目录），相对 file: 按进程 CWD 解析会失败
-	    - 普通相对库名 → BuildPath(Path_SM, "data/sqlite/<name>.sq3")（内部BuildPath=绝对路径）
-	                        目录缺失时自动递归创建
-	  => 默认使用相对库名 "crosstalk/shared"，DB 文件落在
-	     <游戏根>/addons/sourcemod/data/sqlite/crosstalk/shared.sq3。
-	  => 需要跨服共享同一文件：所有服务器配置相同的相对库名，且它们共享同一 data/ 目录；
-	     或显式配置 file:/绝对路径/xxx.sq3（目录需预先存在）。
+	  SM 的 sqlite 扩展编译时带 SQLITE_USE_URI，SqDriver::Connect 对 database 名：
+	    - "file:xxx" 前缀 → 原样透传给 sqlite3_open（URI 模式），file:/绝对路径 可用
+	    - 普通相对库名 → 落在 data/sqlite/<name>.sq3（驱动内部机制，本项目不采用）
+	  => 默认用 file:<Path_SM>/data/crosstalk/shared.sq3 绝对 URI，DB 文件落在
+	     <游戏根>/addons/sourcemod/data/crosstalk/shared.sq3（README 架构图所示路径）。
+	  => 需要跨服共享同一文件：所有服务器共享同一 data/ 目录时零配置；
+	     或显式配置 file:/绝对路径/xxx.sq3（目录由本插件自建）。
 */
 
 // =====[ CONSTANTS ]=====
@@ -38,28 +37,27 @@ bool gB_DBReady;
 int gI_LastReadId;      // 本服已读的最大消息 id
 bool gB_Polling;        // 防止轮询重入
 bool gB_CleanupPending; // 清理标记
-char gC_DbName[512];    // 规范化后的 database 名（供目录自建/诊断使用）
+int gI_PollingTicks;    // 轮询重入计数（自愈用）
 
 // =====[ PATH / DIRECTORY HELPERS ]=====
 
-// 将"相对 SM 的路径"规范化为相对库名（供 sqlite 驱动解析为绝对路径）。
-// 前置知识（从 SourceMod sqlite 驱动源码 SqDriver::Connect 确认）：
-//   - 传 "file:xxx" 会被驱动**原样透传**（不解析、不建目录），相对 file: 按 CWD 解析 → 失败
-//   - 传普通相对库名（如 "crosstalk/shared"）驱动会:
-//       BuildPath(Path_SM, "data/sqlite/<name>.sq3")  → 绝对路径
-//       并在目录缺失时自动递归创建 → 成功
-// 所以默认正确用法 = 相对库名，绝不传 file: 相对 URI。
-//
-// 本函数把用户可配的路径规范化为相对库名：
-//   空                       → "crosstalk/shared"（默认共享, data/sqlite/crosstalk/shared.sq3）
-//   file:/绝对路径/xxx.sq3   → 原样透传（保持 file: 成对；用户负责目录存在）
-//   普通相对名               → 原样透传（<=> 相对库名）
-//   旧值 file:addons/...     → 降级为相对库名（剥离前缀, 兼容旧 cfg）
-void CT_NormalizeDbName(const char[] dbPath, char[] output, int maxlength)
+// 把用户可配的 cross_talk_db_path 规范化为 sqlite3 可用的 URI / 库名。
+// 前置知识（SM sqlite 驱动源码确认）：以 "file:" 开头的 database 名原样透传
+// 给 sqlite3_open（本扩展带 SQLITE_USE_URI，绝对 URI 可用）；相对 file: URI
+// 按进程 CWD 解析不可控，绝不放行。
+// 规范化规则：
+//   空                          → file:<SM>/data/crosstalk/shared.sq3（默认共享）
+//   file:/绝对路径/xxx.sq3      → 原样透传（URI 成对）
+//   file:相对路径               → 相对 <SM> 解析后拼回绝对 URI
+//   普通相对路径 data/xxx       → file:<SM>/data/xxx
+//   其它相对路径（含 v0.1.4 相对库名 "crosstalk/shared"）→ file:<SM>/<值>
+void CT_NormalizeDbUri(const char[] dbPath, char[] output, int maxlength)
 {
 	if (dbPath[0] == '\0')
 	{
-		strcopy(output, maxlength, "crosstalk/shared");
+		char abs[PLATFORM_MAX_PATH];
+		BuildPath(Path_SM, abs, sizeof(abs), "data/crosstalk/shared.sq3");
+		Format(output, maxlength, "file:%s", abs);
 		return;
 	}
 	if (strncmp(dbPath, "file:/", 6) == 0)
@@ -70,64 +68,49 @@ void CT_NormalizeDbName(const char[] dbPath, char[] output, int maxlength)
 	}
 	if (strncmp(dbPath, "file:", 5) == 0)
 	{
-		// 旧版相对 URI（file:addons/...）→ 剥离前缀，按相对库名处理
-		char rel[256];
+		// 相对 URI（file:xxx）→ 相对 Path_SM 解析，拼回绝对 URI
+		char rel[PLATFORM_MAX_PATH];
 		strcopy(rel, sizeof(rel), dbPath[5]);
-		// 剥离可能重复的 addons/sourcemod/ 前缀
 		if (strncmp(rel, "addons/sourcemod/", 17) == 0)
 		{
-			strcopy(output, maxlength, rel[17]);
+			strcopy(rel, sizeof(rel), rel[17]); // 剥离重复前缀（Path_SM 已含）
 		}
-		else
-		{
-			strcopy(output, maxlength, rel);
-		}
+		char abs[PLATFORM_MAX_PATH];
+		BuildPath(Path_SM, abs, sizeof(abs), "%s", rel);
+		Format(output, maxlength, "file:%s", abs);
 		return;
 	}
-	// 普通相对库名：原样传递
-	strcopy(output, maxlength, dbPath);
+	// 普通相对路径：相对 <SM> 解析（v0.1.4 相对库名如 "crosstalk/shared" 同样落此分支）
+	char abs[PLATFORM_MAX_PATH];
+	BuildPath(Path_SM, abs, sizeof(abs), "%s", dbPath);
+	Format(output, maxlength, "file:%s", abs);
 }
 
-// 连接前确保父目录存在：CreateFolder 遇到任意错误（含已存在、无写权限）都返回
-// false，驱动据此 break 掉逐级建目录循环 → data/sqlite/crosstalk 缺失时
-// sqlite3_open 直接失败，之后每次写入都会报 "DB not ready, dropping message"。
-// 这里用 DirExists 先行检查规避该缺陷；目录权限 = 0755 & ~umask。
-// 注意：插件以 csgoserver 用户运行时，若其 umask 为 0077，新建目录会继承
-// 0077 权限（如 d-wxrw---t 所示的旧目录），其他账号（如 FTP 管理面板）将无法
-// 进入；需要放宽时先修 umask 或手动 chmod。
-static void CT_EnsureDbDir()
+// 确保 file: URI 指向的父目录存在（SQLite 只建文件不建目录）。
+// 目录权限 = 0755 & ~umask；若进程 umask 为 0077，新建目录仅属主可见，
+// 其他账号（如 FTP 管理面板）无法进入，需要时手动 chmod 或修 umask。
+static void CT_EnsureDbDir(const char[] dbUri)
 {
-	char rel[PLATFORM_MAX_PATH];
+	char filePath[PLATFORM_MAX_PATH];
+	strcopy(filePath, sizeof(filePath), dbUri[5]); // 剥离 "file:"
 
-	// dbName = "crosstalk/shared" → Path_SM 下 data/sqlite/crosstalk/
-	if (strncmp(gC_DbName, "file:", 5) == 0)
-	{
-		// file: URI：用户负责目录存在（与 convar 描述一致），不做处理
-		return;
-	}
-	BuildPath(Path_SM, rel, sizeof(rel), "data/sqlite/%s", gC_DbName);
-	// 去掉文件名，保留目录部分
-	int last = FindCharInString(rel, '/', true);
+	int last = FindCharInString(filePath, '/', true);
 	if (last <= 0)
 	{
 		return;
 	}
-	rel[last] = '\0';
-	if (DirExists(rel))
-	{
-		return;
-	}
+	filePath[last] = '\0';
 
-	// 逐级创建（CreateDirectory 一次只建一级）
+	// 逐级创建（CreateDirectory 一次只建一级），DirExists 先行规避已存在误报
 	char partial[PLATFORM_MAX_PATH];
-	int len = strlen(rel);
+	int len = strlen(filePath);
 	for (int i = 1; i < len; i++)
 	{
-		if (rel[i] != '/' || i + 1 > len)
+		if (filePath[i] != '/')
 		{
 			continue;
 		}
-		strcopy(partial, i + 1, rel);
+		strcopy(partial, i + 1, filePath);
 		if (!DirExists(partial) && !CreateDirectory(partial, 0755))
 		{
 			LogError("[CrossTalk] Could not create directory: %s", partial);
@@ -135,12 +118,12 @@ static void CT_EnsureDbDir()
 		}
 		return;
 	}
-	if (!DirExists(rel) && !CreateDirectory(rel, 0755))
+	if (!DirExists(filePath) && !CreateDirectory(filePath, 0755))
 	{
-		LogError("[CrossTalk] Could not create directory: %s", rel);
+		LogError("[CrossTalk] Could not create directory: %s", filePath);
 		return;
 	}
-	CT_LogDebug("DB dir ensured: %s", rel);
+	CT_LogDebug("DB dir ensured: %s", filePath);
 }
 
 // =====[ PUBLIC ]=====
@@ -162,32 +145,34 @@ void CT_DB_Init()
 	}
 	TrimString(dbPath);
 
-	// 规范化为驱动可用的 database 名
-	char dbName[512];
-	CT_NormalizeDbName(dbPath, dbName, sizeof(dbName));
-	kv.SetString("database", dbName);
-	CT_LogDebug("DB name: %s", dbName);
+	// 规范化为 sqlite3 可用的 file: URI
+	char dbUri[PLATFORM_MAX_PATH];
+	CT_NormalizeDbUri(dbPath, dbUri, sizeof(dbUri));
+	kv.SetString("database", dbUri);
+	CT_LogDebug("DB uri: %s", dbUri);
 
-	// 驱动缺陷规避：其逐级建目录循环在 CreateFolder 失败时静默 break，
-	// 导致 data/sqlite/<db> 缺失时 sqlite3_open 直接失败。连接前先自建。
-	strcopy(gC_DbName, sizeof(gC_DbName), dbName);
-	CT_EnsureDbDir();
+	// SQLite 只建文件不建目录；连接前自建父目录（权限 0755 & umask）
+	CT_EnsureDbDir(dbUri);
 
 	gH_DB = SQL_ConnectCustom(kv, error, sizeof(error), true);
 	delete kv;
 
 	if (gH_DB == null)
 	{
-		// 详细失败日志：ConVar 原始值 + 规范化 dbName + 驱动错误
+		// 详细失败日志：ConVar 原始值 + 规范化 URI + 驱动错误
 		LogError("[CrossTalk] SQLite connect failed: %s", error);
 		LogError("[CrossTalk]   convar cross_talk_db_path='%s'", dbPath);
-		LogError("[CrossTalk]   normalized database='%s'", dbName);
+		LogError("[CrossTalk]   database uri='%s'", dbUri);
 		{
 			char probe[PLATFORM_MAX_PATH];
-			BuildPath(Path_SM, probe, sizeof(probe), "data/sqlite/%s.sq3", dbName);
+			strcopy(probe, sizeof(probe), dbUri[5]);
 			LogError("[CrossTalk]   target file='%s'", probe);
-			BuildPath(Path_SM, probe, sizeof(probe), "data/sqlite");
-			LogError("[CrossTalk]   data/sqlite dir exists=%d (missing/unreadable parent breaks connect; check owner & permissions)",
+			int last = FindCharInString(probe, '/', true);
+			if (last > 0)
+			{
+				probe[last] = '\0';
+			}
+			LogError("[CrossTalk]   parent dir exists=%d (check owner & permissions; game process must be able to write)",
 				DirExists(probe));
 		}
 		LogError("[CrossTalk]   hint: leave cross_talk_db_path empty for default shared database");
@@ -300,11 +285,22 @@ public void CT_DB_Callback_Insert(Database db, DBResultSet results, const char[]
 // 轮询新消息（供 state.sp 的定时器调用）
 void CT_DB_PollNewMessages()
 {
-	if (gH_DB == null || !gB_DBReady || gB_Polling)
+	if (gH_DB == null || !gB_DBReady)
 	{
 		return;
 	}
+	if (gB_Polling)
+	{
+		// 自愈：异步回调丢失（如换图/关闭中）会卡死重入标志，超时强制放行
+		gI_PollingTicks++;
+		if (gI_PollingTicks < 40) // 40 × 0.5s = 20s
+		{
+			return;
+		}
+		LogError("[CrossTalk] Poll callback stuck >20s, forcing re-poll");
+	}
 	gB_Polling = true;
+	gI_PollingTicks = 0;
 
 	char query[512];
 	// 本服自身的消息由本地已显示，这里全取，渲染端跳过 server_id == 本服。
@@ -318,6 +314,7 @@ void CT_DB_PollNewMessages()
 public void CT_DB_Callback_Poll(Database db, DBResultSet results, const char[] error, any data)
 {
 	gB_Polling = false;
+	gI_PollingTicks = 0;
 	if (error[0] != '\0')
 	{
 		LogError("[CrossTalk] Poll failed: %s", error);

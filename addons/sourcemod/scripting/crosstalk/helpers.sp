@@ -107,8 +107,10 @@ bool CT_IsEmpty(const char[] message)
 	return message[0] == '\0';
 }
 
-// 聊天颜色码（sourcemod-colors 兼容，仅常用几种）
-// 返回对应 chat color 前缀（含 \x07 完整色码）到 buffer
+// 聊天颜色码（CS:GO 原生 SayText2 调色板，仅支持固定字节，不支持 TF2 式
+// \x07RRGGBB 十六进制码 —— 传给 CS:GO 只会被当纯文本打印出来）。
+// 色码表核对自 chat-processor colorvariables.inc 的非 Source2009 分支。
+// 返回对应 chat color 前缀字节到 buffer
 void CT_ApplyColor(const char[] colorName, char[] buffer, int maxlength)
 {
 	if (StrEqual(colorName, "{default}"))
@@ -117,35 +119,51 @@ void CT_ApplyColor(const char[] colorName, char[] buffer, int maxlength)
 	}
 	else if (StrEqual(colorName, "{red}"))
 	{
-		Format(buffer, maxlength, "\x07FF4040");
-	}
-	else if (StrEqual(colorName, "{green}"))
-	{
-		Format(buffer, maxlength, "\x073EFF3E");
-	}
-	else if (StrEqual(colorName, "{lime}"))
-	{
-		Format(buffer, maxlength, "\x0700FF00");
-	}
-	else if (StrEqual(colorName, "{orange}"))
-	{
-		Format(buffer, maxlength, "\x07FFA500");
-	}
-	else if (StrEqual(colorName, "{purple}"))
-	{
-		Format(buffer, maxlength, "\x07800080");
-	}
-	else if (StrEqual(colorName, "{grey}") || StrEqual(colorName, "{gray}"))
-	{
-		Format(buffer, maxlength, "\x07CCCCCC");
-	}
-	else if (StrEqual(colorName, "{gold}"))
-	{
-		Format(buffer, maxlength, "\x07FFD700");
+		Format(buffer, maxlength, "\x07");
 	}
 	else if (StrEqual(colorName, "{darkred}"))
 	{
-		Format(buffer, maxlength, "\x078B0000");
+		Format(buffer, maxlength, "\x02");
+	}
+	else if (StrEqual(colorName, "{lightred}"))
+	{
+		Format(buffer, maxlength, "\x0F");
+	}
+	else if (StrEqual(colorName, "{green}"))
+	{
+		Format(buffer, maxlength, "\x04");
+	}
+	else if (StrEqual(colorName, "{lime}") || StrEqual(colorName, "{lightgreen}"))
+	{
+		Format(buffer, maxlength, "\x05");
+	}
+	else if (StrEqual(colorName, "{orange}") || StrEqual(colorName, "{yellow}"))
+	{
+		Format(buffer, maxlength, "\x09");
+	}
+	else if (StrEqual(colorName, "{purple}") || StrEqual(colorName, "{blue}"))
+	{
+		Format(buffer, maxlength, "\x0B");
+	}
+	else if (StrEqual(colorName, "{grey}") || StrEqual(colorName, "{gray}"))
+	{
+		Format(buffer, maxlength, "\x08");
+	}
+	else if (StrEqual(colorName, "{gold}"))
+	{
+		Format(buffer, maxlength, "\x10");
+	}
+	else if (StrEqual(colorName, "{darkblue}"))
+	{
+		Format(buffer, maxlength, "\x0C");
+	}
+	else if (StrEqual(colorName, "{orchid}"))
+	{
+		Format(buffer, maxlength, "\x0E");
+	}
+	else if (StrEqual(colorName, "{teamcolor}"))
+	{
+		Format(buffer, maxlength, "\x03");
 	}
 	else
 	{
