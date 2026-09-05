@@ -41,23 +41,110 @@ int gI_PollingTicks;    // 轮询重入计数（自愈用）
 
 // =====[ PATH / DIRECTORY HELPERS ]=====
 
+// 把 SM 目录（<SM> = csgo/addons/sourcemod）解析为 sqlite 可用的"绝对"路径。
+//
+// 背景（已在用户服务器实测定位）：SMAPI 的基础目录可能是相对形式（如
+// "./addons/sourcemod"，srcds_run 用相对路径启动时 argv[0] 推导出 '.'），
+// BuildPath 输出随之相对。SM 文件原生（DirExists/CreateDirectory）按同一
+// 相对基准解析彼此一致，但 sqlite3 对相对路径/相对 file: URI 按**进程 CWD**
+// 解析（unixFullPathname → mkFullPathname → getcwd，已在本地编译 sqlite 源码
+// 复现）。两边基准可能不同（面板部署 CWD 常是 csgo/ 的父目录），导致
+// "SM 原生建对了目录、sqlite 却打不开/开到别处"。
+//
+// 通解（已本地验证）：Linux procfs 的 /proc/self/cwd 是指向进程自身 CWD 的
+// 内核符号链接。对 sqlite 而言它是绝对路径（unixFullPathname 阶段 readlink
+// 展开为真实绝对位置）；SM 原生对它的 stat 同样成立。于是：
+//   DirExists("/proc/self/cwd/csgo/addons/sourcemod")  → CWD=游戏根布局
+//   DirExists("/proc/self/cwd/addons/sourcemod")       → CWD=mod 目录布局
+// 命中的串直接作为 sqlite file: URI 的路径——与 SM 原生看到的世界严格一致。
+//
+// 目录创建注意：procfs 只读，不能 CreateDirectory("/proc/...")。但 SM 原生
+// 的相对基准与 CWD 一致（相对基准只可能相对 CWD），CT_EnsureDbDir 用
+// BuildPath 相对结果建目录即可落位正确，无需 proc 路径。
+//
+// 策略（按可靠度排序）：
+//   1. BuildPath 结果本身已绝对（Windows / 绝对启动路径）→ 直接用
+//   2. /proc/self/cwd/<gameDir>/addons/sourcemod（CWD=游戏根，如 serverfiles/）
+//   3. /proc/self/cwd/addons/sourcemod（CWD=mod 目录，标准 srcds 部署）
+//   4. 命令行 -game 绝对路径候选
+//   5. 兜底：相对形式（best effort）
+// 返回 true 表示得到了绝对/proc 路径；false 表示退回相对（连接可能因
+// CWD 不匹配失败，诊断日志会给出指引）。
+static bool CT_TrySmDir(const char[] base, const char[] relTail,
+						char[] output, int maxlength)
+{
+	Format(output, maxlength, "%s/%s", base, relTail);
+	return DirExists(output);
+}
+
+static bool CT_AbsoluteSmDir(char[] output, int maxlength)
+{
+	char smRel[PLATFORM_MAX_PATH];
+	BuildPath(Path_SM, smRel, sizeof(smRel), "addons/sourcemod");
+
+	// 1) BuildPath 已给出绝对路径（标准部署 / Windows）
+	if (smRel[0] == '/' || (smRel[1] == ':' && (smRel[2] == '\\' || smRel[2] == '/')))
+	{
+		strcopy(output, maxlength, smRel);
+		return true;
+	}
+
+	char gameDir[64];
+	GetGameFolderName(gameDir, sizeof(gameDir));
+
+	char cand[PLATFORM_MAX_PATH];
+
+	// 2) CWD=游戏根布局：csgo/ 是 CWD 的子目录（面板部署常见，如 serverfiles/）
+	if (gameDir[0] != '\0' &&
+		DirExists("/proc/self/cwd") &&
+		CT_TrySmDir("/proc/self/cwd", gameDir, cand, sizeof(cand)) &&
+		CT_TrySmDir(cand, "addons/sourcemod", cand, sizeof(cand)))
+	{
+		strcopy(output, maxlength, cand);
+		return true;
+	}
+
+	// 3) CWD=mod 目录布局（标准 srcds 部署：CWD 即 csgo/）
+	if (DirExists("/proc/self/cwd") &&
+		CT_TrySmDir("/proc/self/cwd", "addons/sourcemod", cand, sizeof(cand)))
+	{
+		strcopy(output, maxlength, cand);
+		return true;
+	}
+
+	// 4) 命令行 -game：绝对路径则 SM 目录 = <game路径>/addons/sourcemod
+	char gameArg[PLATFORM_MAX_PATH];
+	GetCommandLineParam("-game", gameArg, sizeof(gameArg), "");
+	if (gameArg[0] == '/' || (gameArg[1] == ':' && (gameArg[2] == '\\' || gameArg[2] == '/')))
+	{
+		if (CT_TrySmDir(gameArg, "addons/sourcemod", cand, sizeof(cand)))
+		{
+			strcopy(output, maxlength, cand);
+			return true;
+		}
+	}
+
+	// 5) 兜底：相对形式（best effort，交由 sqlite 按 CWD 解析）
+	strcopy(output, maxlength, smRel);
+	return false;
+}
+
 // 把用户可配的 cross_talk_db_path 规范化为 sqlite3 可用的 URI / 库名。
 // 前置知识（SM sqlite 驱动源码确认）：以 "file:" 开头的 database 名原样透传
 // 给 sqlite3_open（本扩展带 SQLITE_USE_URI，绝对 URI 可用）；相对 file: URI
-// 按进程 CWD 解析不可控，绝不放行。
+// 按进程 CWD 解析不可控，尽力绝对化（见 CT_AbsoluteSmDir）。
 // 规范化规则：
 //   空                          → file:<SM>/data/crosstalk/shared.sq3（默认共享）
 //   file:/绝对路径/xxx.sq3      → 原样透传（URI 成对）
-//   file:相对路径               → 相对 <SM> 解析后拼回绝对 URI
+//   file:相对路径               → 相对 <SM> 解析后拼回 URI
 //   普通相对路径 data/xxx       → file:<SM>/data/xxx
-//   其它相对路径（含 v0.1.4 相对库名 "crosstalk/shared"）→ file:<SM>/<值>
 void CT_NormalizeDbUri(const char[] dbPath, char[] output, int maxlength)
 {
 	if (dbPath[0] == '\0')
 	{
 		char abs[PLATFORM_MAX_PATH];
-		BuildPath(Path_SM, abs, sizeof(abs), "data/crosstalk/shared.sq3");
-		Format(output, maxlength, "file:%s", abs);
+		CT_AbsoluteSmDir(abs, sizeof(abs));
+		Format(output, maxlength, "file:%s/data/crosstalk/shared.sq3", abs);
 		return;
 	}
 	if (strncmp(dbPath, "file:/", 6) == 0)
@@ -75,11 +162,15 @@ void CT_NormalizeDbUri(const char[] dbPath, char[] output, int maxlength)
 		{
 			strcopy(rel, sizeof(rel), rel[17]); // 剥离重复前缀（Path_SM 已含）
 		}
-		BuildPath(Path_SM, output, maxlength, "file:%s", rel);
+		char abs[PLATFORM_MAX_PATH];
+		CT_AbsoluteSmDir(abs, sizeof(abs));
+		Format(output, maxlength, "file:%s/%s", abs, rel);
 		return;
 	}
 	// 普通相对路径：相对 <SM> 解析（v0.1.4 相对库名如 "crosstalk/shared" 同样落此分支）
-	BuildPath(Path_SM, output, maxlength, "file:%s", dbPath);
+	char abs[PLATFORM_MAX_PATH];
+	CT_AbsoluteSmDir(abs, sizeof(abs));
+	Format(output, maxlength, "file:%s/%s", abs, dbPath);
 }
 
 // 确保 file: URI 指向的父目录存在（SQLite 只建文件不建目录）。
@@ -175,7 +266,7 @@ void CT_DB_Init()
 				DirExists(probe));
 		}
 		LogError("[CrossTalk]   hint: leave cross_talk_db_path empty for default shared database");
-		LogError("[CrossTalk]   hint: relative URIs resolve against the game process CWD; if this server's CWD differs from the game root (common with panels/daemons), set an absolute path: cross_talk_db_path \"file:/absolute/path/to/csgo/addons/sourcemod/data/crosstalk/shared.sq3\" (all servers must share the same file; check CWD: ls -l /proc/$(pgrep srcds_linux)/cwd)");
+		LogError("[CrossTalk]   hint: DB path is auto-resolved to the real SM dir (proc/self/cwd); if connect still fails, set absolute path: cross_talk_db_path \"file:/absolute/path/to/csgo/addons/sourcemod/data/crosstalk/shared.sq3\" (all servers must share the same file; check CWD: ls -l /proc/$(pgrep srcds_linux)/cwd)");
 		return;
 	}
 
