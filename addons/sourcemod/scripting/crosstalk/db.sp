@@ -41,179 +41,106 @@ int gI_PollingTicks;    // 轮询重入计数（自愈用）
 
 // =====[ PATH / DIRECTORY HELPERS ]=====
 
-// 把 SM 目录（<SM> = csgo/addons/sourcemod）解析为 sqlite 可用的"绝对"路径。
-//
-// 背景（已在用户服务器实测定位）：SMAPI 的基础目录可能是相对形式（如
-// "./addons/sourcemod"，srcds_run 用相对路径启动时 argv[0] 推导出 '.'），
-// BuildPath 输出随之相对。SM 文件原生（DirExists/CreateDirectory）按同一
-// 相对基准解析彼此一致，但 sqlite3 对相对路径/相对 file: URI 按**进程 CWD**
-// 解析（unixFullPathname → mkFullPathname → getcwd，已在本地编译 sqlite 源码
-// 复现）。两边基准可能不同（面板部署 CWD 常是 csgo/ 的父目录），导致
-// "SM 原生建对了目录、sqlite 却打不开/开到别处"。
-//
-// 通解（已本地验证）：Linux procfs 的 /proc/self/cwd 是指向进程自身 CWD 的
-// 内核符号链接。对 sqlite 而言它是绝对路径（unixFullPathname 阶段 readlink
-// 展开为真实绝对位置）；SM 原生对它的 stat 同样成立。于是：
-//   DirExists("/proc/self/cwd/csgo/addons/sourcemod")  → CWD=游戏根布局
-//   DirExists("/proc/self/cwd/addons/sourcemod")       → CWD=mod 目录布局
-// 命中的串直接作为 sqlite file: URI 的路径——与 SM 原生看到的世界严格一致。
-//
-// 目录创建注意：procfs 只读，不能 CreateDirectory("/proc/...")。但 SM 原生
-// 的相对基准与 CWD 一致（相对基准只可能相对 CWD），CT_EnsureDbDir 用
-// BuildPath 相对结果建目录即可落位正确，无需 proc 路径。
-//
-// 策略（按可靠度排序）：
-//   1. BuildPath 结果本身已绝对（Windows / 绝对启动路径）→ 直接用
-//   2. /proc/self/cwd/<gameDir>/addons/sourcemod（CWD=游戏根，如 serverfiles/）
-//   3. /proc/self/cwd/addons/sourcemod（CWD=mod 目录，标准 srcds 部署）
-//   4. 命令行 -game 绝对路径候选
-//   5. 兜底：相对形式（best effort）
-// 返回 true 表示得到了绝对/proc 路径；false 表示退回相对（连接可能因
-// CWD 不匹配失败，诊断日志会给出指引）。
-static bool CT_TrySmDir(const char[] base, const char[] relTail,
-						char[] output, int maxlength)
+// 数据库目录定位（已在用户服务器实测多轮定位出的事实）：
+//   1. SM 文件原生（BuildPath/DirExists/CreateDirectory）的相对基准是
+//      mod 目录（csgo/）——即使 BuildPath 输出形如 "addons/sourcemod"，
+//      实际落点始终在真实 <mod>/addons/sourcemod 下（目录嵌套事故证实）。
+//      且 DirExists 内部先做 BuildPath(Path_Game,...)，绝对输入会被错误
+//      拼接（见 smn_filesystem.cpp sm_DirExists），SM 原生无法探测绝对路径。
+//   2. sqlite3 对相对路径/相对 file: URI 按**进程 CWD**解析
+//      （unixFullPathname → mkFullPathname → getcwd，本地编译 sqlite 源码
+//      复现）。CWD 因部署而异（serverfiles/ 面板、csgo/、其他），与 SM
+//      原生基准可能差一层 csgo/ 甚至完全不同。
+//   3. procfs 的 /proc/self/cwd 是内核符号链接，sqlite 在 unixFullPathname
+//      阶段 readlink 展开为真实绝对路径（本地验证：任意 CWD 下均指向进程
+//      CWD 内的正确文件）。
+// 结论：无法在插件内"先算出正确绝对路径"（SM 原生探测不了绝对路径，
+// SourcePawn 拿不到 CWD），但可以**枚举候选、逐个试连、谁通用谁**：
+// 指向错误位置的候选因父目录不存在必然 SQLITE_CANTOPEN，唯一连通的
+// 候选即与 SM 原生建好的目录对齐的那一个。候选按命中概率排序：
+//   a. file:/proc/self/cwd/<gameDir>/addons/sourcemod/...  (CWD=游戏根)
+//   b. file:/proc/self/cwd/addons/sourcemod/...            (CWD=mod 目录)
+//   c. file:<SM 原生相对串>/...                             (CWD 与 SM 基准一致)
+// 全部失败再报错（含绝对路径配置指引）。用户显式配置 file:/ 绝对 URI 时
+// 直接透传，不走候选探测。
+static void CT_BuildDbUriCandidates(const char[] dbPath, char candidates[][PLATFORM_MAX_PATH], int maxCandidates, int &count)
 {
-	Format(output, maxlength, "%s/%s", base, relTail);
-	return DirExists(output);
-}
-
-static bool CT_AbsoluteSmDir(char[] output, int maxlength)
-{
-	char smRel[PLATFORM_MAX_PATH];
-	BuildPath(Path_SM, smRel, sizeof(smRel), "addons/sourcemod");
-
-	// 1) BuildPath 已给出绝对路径（标准部署 / Windows）
-	if (smRel[0] == '/' || (smRel[1] == ':' && (smRel[2] == '\\' || smRel[2] == '/')))
-	{
-		strcopy(output, maxlength, smRel);
-		return true;
-	}
-
+	count = 0;
 	char gameDir[64];
 	GetGameFolderName(gameDir, sizeof(gameDir));
 
-	char cand[PLATFORM_MAX_PATH];
-
-	// 2) CWD=游戏根布局：csgo/ 是 CWD 的子目录（面板部署常见，如 serverfiles/）
-	if (gameDir[0] != '\0' &&
-		DirExists("/proc/self/cwd") &&
-		CT_TrySmDir("/proc/self/cwd", gameDir, cand, sizeof(cand)) &&
-		CT_TrySmDir(cand, "addons/sourcemod", cand, sizeof(cand)))
-	{
-		strcopy(output, maxlength, cand);
-		return true;
-	}
-
-	// 3) CWD=mod 目录布局（标准 srcds 部署：CWD 即 csgo/）
-	if (DirExists("/proc/self/cwd") &&
-		CT_TrySmDir("/proc/self/cwd", "addons/sourcemod", cand, sizeof(cand)))
-	{
-		strcopy(output, maxlength, cand);
-		return true;
-	}
-
-	// 4) 命令行 -game：绝对路径则 SM 目录 = <game路径>/addons/sourcemod
-	char gameArg[PLATFORM_MAX_PATH];
-	GetCommandLineParam("-game", gameArg, sizeof(gameArg), "");
-	if (gameArg[0] == '/' || (gameArg[1] == ':' && (gameArg[2] == '\\' || gameArg[2] == '/')))
-	{
-		if (CT_TrySmDir(gameArg, "addons/sourcemod", cand, sizeof(cand)))
-		{
-			strcopy(output, maxlength, cand);
-			return true;
-		}
-	}
-
-	// 5) 兜底：相对形式（best effort，交由 sqlite 按 CWD 解析）
-	strcopy(output, maxlength, smRel);
-	return false;
-}
-
-// 把用户可配的 cross_talk_db_path 规范化为 sqlite3 可用的 URI / 库名。
-// 前置知识（SM sqlite 驱动源码确认）：以 "file:" 开头的 database 名原样透传
-// 给 sqlite3_open（本扩展带 SQLITE_USE_URI，绝对 URI 可用）；相对 file: URI
-// 按进程 CWD 解析不可控，尽力绝对化（见 CT_AbsoluteSmDir）。
-// 规范化规则：
-//   空                          → file:<SM>/data/crosstalk/shared.sq3（默认共享）
-//   file:/绝对路径/xxx.sq3      → 原样透传（URI 成对）
-//   file:相对路径               → 相对 <SM> 解析后拼回 URI
-//   普通相对路径 data/xxx       → file:<SM>/data/xxx
-void CT_NormalizeDbUri(const char[] dbPath, char[] output, int maxlength)
-{
+	// 相对尾部的两种来源：
+	//   默认（cfg 空）→ data/crosstalk/shared.sq3（相对 SM 目录）
+	//   用户配置相对路径 → 剥掉重复的 SM 目录前缀后相对 SM 目录
+	char rel[PLATFORM_MAX_PATH];
 	if (dbPath[0] == '\0')
 	{
-		char abs[PLATFORM_MAX_PATH];
-		CT_AbsoluteSmDir(abs, sizeof(abs));
-		Format(output, maxlength, "file:%s/data/crosstalk/shared.sq3", abs);
-		return;
+		strcopy(rel, sizeof(rel), "data/crosstalk/shared.sq3");
 	}
-	if (strncmp(dbPath, "file:/", 6) == 0)
+	else if (strncmp(dbPath, "file:", 5) == 0)
 	{
-		// 绝对 URI：透明传递
-		strcopy(output, maxlength, dbPath);
-		return;
-	}
-	if (strncmp(dbPath, "file:", 5) == 0)
-	{
-		// 相对 URI（file:xxx）→ 相对 Path_SM 解析
-		char rel[PLATFORM_MAX_PATH];
 		strcopy(rel, sizeof(rel), dbPath[5]);
+		TrimString(rel);
 		if (strncmp(rel, "addons/sourcemod/", 17) == 0)
 		{
-			strcopy(rel, sizeof(rel), rel[17]); // 剥离重复前缀（Path_SM 已含）
+			strcopy(rel, sizeof(rel), rel[17]);
 		}
-		char abs[PLATFORM_MAX_PATH];
-		CT_AbsoluteSmDir(abs, sizeof(abs));
-		Format(output, maxlength, "file:%s/%s", abs, rel);
-		return;
 	}
-	// 普通相对路径：相对 <SM> 解析（v0.1.4 相对库名如 "crosstalk/shared" 同样落此分支）
-	char abs[PLATFORM_MAX_PATH];
-	CT_AbsoluteSmDir(abs, sizeof(abs));
-	Format(output, maxlength, "file:%s/%s", abs, dbPath);
+	else
+	{
+		strcopy(rel, sizeof(rel), dbPath);
+		TrimString(rel);
+		if (strncmp(rel, "addons/sourcemod/", 17) == 0)
+		{
+			strcopy(rel, sizeof(rel), rel[17]);
+		}
+	}
+
+	// 候选 a：CWD=游戏根（如 /home/x/serverfiles，含 csgo/ 子目录）
+	if (gameDir[0] != '\0' && count < maxCandidates)
+	{
+		Format(candidates[count], PLATFORM_MAX_PATH, "file:/proc/self/cwd/%s/addons/sourcemod/%s", gameDir, rel);
+		count++;
+	}
+	// 候选 b：CWD=mod 目录（标准 srcds 部署，CWD 即 csgo/）
+	if (count < maxCandidates)
+	{
+		Format(candidates[count], PLATFORM_MAX_PATH, "file:/proc/self/cwd/addons/sourcemod/%s", rel);
+		count++;
+	}
+	// 候选 c：SM 原生相对串（BuildPath 输出，CWD 与 SM 基准一致时可用）
+	if (count < maxCandidates)
+	{
+		char smRel[PLATFORM_MAX_PATH];
+		BuildPath(Path_SM, smRel, sizeof(smRel), "%s", rel);
+		Format(candidates[count], PLATFORM_MAX_PATH, "file:%s", smRel);
+		count++;
+	}
 }
 
-// 确保 file: URI 指向的父目录存在（SQLite 只建文件不建目录）。
-// 权限 = 0o755 & ~umask（umask 0077 时仅属主可进，其他账号无法访问，
+// 在真实 SM 目录下逐级创建 data/... 目录（SM 原生相对基准=mod 目录，
+// 实测落位正确）。权限 = 0o755 & ~umask（umask 0077 时仅属主可进，
 // 需要时手动 chmod 或在启动脚本里设 umask 022）。
-static void CT_EnsureDbDir(const char[] dbUri)
+// 权限注意：SourcePawn 无 0755 八进制字面量，直接写 0755 会按十进制 755
+// （= 0o1363，即 d-wxrw---t）落盘。目标 0o755 必须写十进制 493。
+static void CT_EnsureDbDir(const char[] relUnderSm)
 {
-	char filePath[PLATFORM_MAX_PATH];
-	strcopy(filePath, sizeof(filePath), dbUri[5]); // 剥离 "file:"
-
-	int last = FindCharInString(filePath, '/', true);
-	if (last <= 0)
-	{
-		return;
-	}
-	filePath[last] = '\0';
-
-	// 逐级创建（CreateDirectory 一次只建一级），DirExists 先行规避已存在误报。
-	// CreateDirectory 原生路径相对游戏根（与 BuildPath 相对结果一致），可直接用。
-	// 权限注意：SourcePawn 无 0755 八进制字面量，直接写 0755 会按十进制 755
-	// （= 0o1363，即 d-wxrw---t）落盘。目标 0o755 必须写十进制 493。
-	// 实际权限再经进程 umask 过滤（0022 → 0755；0077 → 0700 仅属主可进）。
 	char partial[PLATFORM_MAX_PATH];
-	int len = strlen(filePath);
+	int len = strlen(relUnderSm);
 	for (int i = 1; i < len; i++)
 	{
-		if (filePath[i] != '/')
+		if (relUnderSm[i] != '/')
 		{
 			continue;
 		}
-		strcopy(partial, i + 1, filePath);
+		strcopy(partial, i + 1, relUnderSm);
 		if (!DirExists(partial) && !CreateDirectory(partial, 493))
 		{
 			LogError("[CrossTalk] Could not create directory: %s", partial);
 			return;
 		}
 	}
-	if (!DirExists(filePath) && !CreateDirectory(filePath, 493))
-	{
-		LogError("[CrossTalk] Could not create directory: %s", filePath);
-		return;
-	}
-	CT_LogDebug("DB dir ensured: %s", filePath);
+	CT_LogDebug("DB dir ensured: %s", relUnderSm);
 }
 
 // =====[ PUBLIC ]=====
@@ -225,8 +152,6 @@ void CT_DB_Init()
 	gB_Polling = false;
 
 	char error[256];
-	KeyValues kv = new KeyValues("");
-	kv.SetString("driver", "sqlite");
 
 	char dbPath[512];
 	if (gCV_DbPath != null)
@@ -235,42 +160,79 @@ void CT_DB_Init()
 	}
 	TrimString(dbPath);
 
-	// 规范化为 sqlite3 可用的 file: URI
-	char dbUri[PLATFORM_MAX_PATH];
-	CT_NormalizeDbUri(dbPath, dbUri, sizeof(dbUri));
-	kv.SetString("database", dbUri);
-	CT_LogDebug("DB uri: %s", dbUri);
+	// 目录自建：SM 原生相对基准=mod 目录，实测落位正确。无论最终哪个
+	// URI 候选连通，目录都已在真实位置备好。
+	CT_EnsureDbDir("data/crosstalk");
 
-	// SQLite 只建文件不建目录；连接前自建父目录（权限 0755 & umask）
-	CT_EnsureDbDir(dbUri);
-
-	gH_DB = SQL_ConnectCustom(kv, error, sizeof(error), true);
-	delete kv;
-
-	if (gH_DB == null)
+	// 用户显式配置绝对 file:/ URI → 直接透传（不做候选探测）
+	if (strncmp(dbPath, "file:/", 6) == 0)
 	{
-		// 详细失败日志：ConVar 原始值 + 规范化 URI + 驱动错误
-		LogError("[CrossTalk] SQLite connect failed: %s", error);
-		LogError("[CrossTalk]   convar cross_talk_db_path='%s'", dbPath);
-		LogError("[CrossTalk]   database uri='%s'", dbUri);
+		KeyValues kv = new KeyValues("");
+		kv.SetString("driver", "sqlite");
+		kv.SetString("database", dbPath);
+
+		gH_DB = SQL_ConnectCustom(kv, error, sizeof(error), true);
+		delete kv;
+
+		if (gH_DB == null)
 		{
-			char probe[PLATFORM_MAX_PATH];
-			strcopy(probe, sizeof(probe), dbUri[5]);
-			LogError("[CrossTalk]   target file='%s'", probe);
-			int last = FindCharInString(probe, '/', true);
-			if (last > 0)
-			{
-				probe[last] = '\0';
-			}
-			LogError("[CrossTalk]   parent dir exists=%d (check owner & permissions; game process must be able to write)",
-				DirExists(probe));
+			CT_LogConnectFailure(dbPath, dbPath, error);
 		}
-		LogError("[CrossTalk]   hint: leave cross_talk_db_path empty for default shared database");
-		LogError("[CrossTalk]   hint: DB path is auto-resolved to the real SM dir (proc/self/cwd); if connect still fails, set absolute path: cross_talk_db_path \"file:/absolute/path/to/csgo/addons/sourcemod/data/crosstalk/shared.sq3\" (all servers must share the same file; check CWD: ls -l /proc/$(pgrep srcds_linux)/cwd)");
+		else
+		{
+			CT_LogDebug("DB connected (explicit uri): %s", dbPath);
+		}
+		CT_DB_FinishInit();
 		return;
 	}
 
-	CT_DB_EnsureSchema();
+	// 默认/相对配置 → 枚举候选 URI 逐个试连（见 CT_BuildDbUriCandidates 注释）
+	char candidates[4][PLATFORM_MAX_PATH];
+	int count;
+	CT_BuildDbUriCandidates(dbPath, candidates, 4, count);
+
+	for (int i = 0; i < count; i++)
+	{
+		KeyValues kv = new KeyValues("");
+		kv.SetString("driver", "sqlite");
+		kv.SetString("database", candidates[i]);
+
+		gH_DB = SQL_ConnectCustom(kv, error, sizeof(error), true);
+		delete kv;
+
+		if (gH_DB != null)
+		{
+			CT_LogDebug("DB connected via uri #%d: %s", i + 1, candidates[i]);
+			CT_DB_FinishInit();
+			return;
+		}
+		CT_LogDebug("DB uri #%d failed: %s (%s)", i + 1, candidates[i], error);
+	}
+
+	// 全部候选失败
+	char lastUri[PLATFORM_MAX_PATH];
+	strcopy(lastUri, sizeof(lastUri), count > 0 ? candidates[count - 1] : "");
+	CT_LogConnectFailure(dbPath, lastUri, error);
+	CT_DB_FinishInit();
+}
+
+// 连接失败统一诊断日志
+static void CT_LogConnectFailure(const char[] dbPath, const char[] dbUri, const char[] error)
+{
+	LogError("[CrossTalk] SQLite connect failed: %s", error);
+	LogError("[CrossTalk]   convar cross_talk_db_path='%s'", dbPath);
+	LogError("[CrossTalk]   database uri='%s'", dbUri);
+	LogError("[CrossTalk]   hint: leave cross_talk_db_path empty for default shared database");
+	LogError("[CrossTalk]   hint: the plugin auto-probes several path candidates; if all fail, set absolute path: cross_talk_db_path \"file:/absolute/path/to/csgo/addons/sourcemod/data/crosstalk/shared.sq3\" (all servers must share the same file; check CWD: ls -l /proc/$(pgrep srcds_linux)/cwd)");
+}
+
+// 连接成败后的收尾（就绪标记 / 表结构初始化）
+static void CT_DB_FinishInit()
+{
+	if (gH_DB != null)
+	{
+		CT_DB_EnsureSchema();
+	}
 }
 
 // 初始化表结构

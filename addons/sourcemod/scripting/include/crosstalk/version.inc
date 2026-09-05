@@ -8,7 +8,7 @@
 #endif
 #define _crosstalk_version_included_
 
-#define CROSSTALK_VERSION "0.1.9"
+#define CROSSTALK_VERSION "0.2.0"
 #define CROSSTALK_VERSION_MAJOR 0
-#define CROSSTALK_VERSION_MINOR 1
-#define CROSSTALK_VERSION_PATCH 9
+#define CROSSTALK_VERSION_MINOR 2
+#define CROSSTALK_VERSION_PATCH 0
