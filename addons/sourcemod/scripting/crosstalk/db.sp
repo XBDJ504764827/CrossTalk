@@ -68,22 +68,18 @@ void CT_NormalizeDbUri(const char[] dbPath, char[] output, int maxlength)
 	}
 	if (strncmp(dbPath, "file:", 5) == 0)
 	{
-		// 相对 URI（file:xxx）→ 相对 Path_SM 解析，拼回绝对 URI
+		// 相对 URI（file:xxx）→ 相对 Path_SM 解析
 		char rel[PLATFORM_MAX_PATH];
 		strcopy(rel, sizeof(rel), dbPath[5]);
 		if (strncmp(rel, "addons/sourcemod/", 17) == 0)
 		{
 			strcopy(rel, sizeof(rel), rel[17]); // 剥离重复前缀（Path_SM 已含）
 		}
-		char abs[PLATFORM_MAX_PATH];
-		BuildPath(Path_SM, abs, sizeof(abs), "%s", rel);
-		Format(output, maxlength, "file:%s", abs);
+		BuildPath(Path_SM, output, maxlength, "file:%s", rel);
 		return;
 	}
 	// 普通相对路径：相对 <SM> 解析（v0.1.4 相对库名如 "crosstalk/shared" 同样落此分支）
-	char abs[PLATFORM_MAX_PATH];
-	BuildPath(Path_SM, abs, sizeof(abs), "%s", dbPath);
-	Format(output, maxlength, "file:%s", abs);
+	BuildPath(Path_SM, output, maxlength, "file:%s", dbPath);
 }
 
 // 确保 file: URI 指向的父目录存在（SQLite 只建文件不建目录）。
@@ -101,7 +97,8 @@ static void CT_EnsureDbDir(const char[] dbUri)
 	}
 	filePath[last] = '\0';
 
-	// 逐级创建（CreateDirectory 一次只建一级），DirExists 先行规避已存在误报
+	// 逐级创建（CreateDirectory 一次只建一级），DirExists 先行规避已存在误报。
+	// CreateDirectory 原生路径相对游戏根（与 BuildPath 相对结果一致），可直接用。
 	char partial[PLATFORM_MAX_PATH];
 	int len = strlen(filePath);
 	for (int i = 1; i < len; i++)
@@ -116,7 +113,6 @@ static void CT_EnsureDbDir(const char[] dbUri)
 			LogError("[CrossTalk] Could not create directory: %s", partial);
 			return;
 		}
-		return;
 	}
 	if (!DirExists(filePath) && !CreateDirectory(filePath, 0755))
 	{
