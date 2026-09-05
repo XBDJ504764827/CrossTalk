@@ -83,8 +83,8 @@ void CT_NormalizeDbUri(const char[] dbPath, char[] output, int maxlength)
 }
 
 // 确保 file: URI 指向的父目录存在（SQLite 只建文件不建目录）。
-// 目录权限 = 0755 & ~umask；若进程 umask 为 0077，新建目录仅属主可见，
-// 其他账号（如 FTP 管理面板）无法进入，需要时手动 chmod 或修 umask。
+// 权限 = 0o755 & ~umask（umask 0077 时仅属主可进，其他账号无法访问，
+// 需要时手动 chmod 或在启动脚本里设 umask 022）。
 static void CT_EnsureDbDir(const char[] dbUri)
 {
 	char filePath[PLATFORM_MAX_PATH];
@@ -99,6 +99,9 @@ static void CT_EnsureDbDir(const char[] dbUri)
 
 	// 逐级创建（CreateDirectory 一次只建一级），DirExists 先行规避已存在误报。
 	// CreateDirectory 原生路径相对游戏根（与 BuildPath 相对结果一致），可直接用。
+	// 权限注意：SourcePawn 无 0755 八进制字面量，直接写 0755 会按十进制 755
+	// （= 0o1363，即 d-wxrw---t）落盘。目标 0o755 必须写十进制 493。
+	// 实际权限再经进程 umask 过滤（0022 → 0755；0077 → 0700 仅属主可进）。
 	char partial[PLATFORM_MAX_PATH];
 	int len = strlen(filePath);
 	for (int i = 1; i < len; i++)
@@ -108,13 +111,13 @@ static void CT_EnsureDbDir(const char[] dbUri)
 			continue;
 		}
 		strcopy(partial, i + 1, filePath);
-		if (!DirExists(partial) && !CreateDirectory(partial, 0755))
+		if (!DirExists(partial) && !CreateDirectory(partial, 493))
 		{
 			LogError("[CrossTalk] Could not create directory: %s", partial);
 			return;
 		}
 	}
-	if (!DirExists(filePath) && !CreateDirectory(filePath, 0755))
+	if (!DirExists(filePath) && !CreateDirectory(filePath, 493))
 	{
 		LogError("[CrossTalk] Could not create directory: %s", filePath);
 		return;
