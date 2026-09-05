@@ -104,7 +104,9 @@ void CT_RenderIncomingMessage(const char[] serverId, const char[] serverName,
 	// 判定：server_id == 本服 server_id
 	// 本地插入的消息轮询回来时 server_id==本服 → 跳过；
 	// 喊话 !crall 由本服管理员发起，本地已由命令回显（HUD+聊天），同样跳过。
-	if (StrEqual(serverId, gC_ServerId, false))
+	// 防御：本服 server_id 尚未初始化（空）时不做本服判定，避免把空 ID 的
+	// 消息（如其他服启动早期写入的）误判为本服消息而丢弃。
+	if (gC_ServerId[0] != '\0' && StrEqual(serverId, gC_ServerId, false))
 	{
 		return;
 	}

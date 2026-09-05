@@ -47,7 +47,7 @@ void CT_CreateConVars()
 	gCV_Enabled = CreateConVar("cross_talk_enabled", "1",
 		"总开关：是否启用跨服聊天功能（0=完全禁用，含接收与渲染）。", _, true, 0.0, true, 1.0);
 	gCV_DbPath = CreateConVar("cross_talk_db_path", "",
-		"共享 SQLite 数据库（留空 = 默认 addons/sourcemod/data/sqlite/crosstalk/shared.sq3，所有服务器共享同一 data/ 目录时零配置互通。或填相对库名如 crosstalk/shared；或绝对路径 file:/绝对路径/xxx.sq3（需目录已存在）。所有服务器必须指向同一个文件才能互通）。");
+		"共享 SQLite 数据库（留空 = 默认 addons/sourcemod/data/crosstalk/shared.sq3，所有服务器共享同一 data/ 目录时零配置互通。或填相对路径如 data/crosstalk/shared.sq3；或绝对路径 file:/绝对路径/xxx.sq3（目录由插件自建）。所有服务器必须指向同一个文件才能互通）。");
 	gCV_ServerId = CreateConVar("cross_talk_server_id", "",
 		"服务器标识（用于消息来源与去重）。留空则自动使用 hostname 值。");
 	gCV_PollInterval = CreateConVar("cross_talk_poll_interval", "0.5",
@@ -55,9 +55,9 @@ void CT_CreateConVars()
 	gCV_AnnounceFlag = CreateConVar("cross_talk_announce_flag", "b",
 		"管理员喊话所需权限位（字母）。b=AdmFlag_Ban, c=Kick, d=Admin, g=Generic, l=Chat, o=Convar, z=Root。");
 	gCV_ChatColor = CreateConVar("cross_talk_chat_color", "{default}",
-		"跨服聊天显示颜色（sourcemod CSGO 颜色码，如 {default} {red} {green} {lime} {orange} {purple} {grey} {gold}）。");
+		"跨服聊天显示颜色（CS:GO 原生色码名，如 {default} {red} {lightred} {darkred} {green} {lime} {lightgreen} {orange} {yellow} {purple} {blue} {darkblue} {grey} {gold} {orchid} {teamcolor}）。注意：CS:GO 不支持十六进制色码。");
 	gCV_AnnounceColor = CreateConVar("cross_talk_announce_color", "{red}",
-		"跨服喊话在聊天框中显示的颜色（如上）。");
+		"跨服喊话在聊天框中显示的颜色（可选值同上）。");
 	gCV_HudX = CreateConVar("cross_talk_hud_x", "-1.0",
 		"HUD 弹屏水平位置（-1.0=居中，0=最左，1=最右）。", _, true, -1.0, true, 1.0);
 	gCV_HudY = CreateConVar("cross_talk_hud_y", "0.1",
