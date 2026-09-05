@@ -175,6 +175,7 @@ void CT_DB_Init()
 				DirExists(probe));
 		}
 		LogError("[CrossTalk]   hint: leave cross_talk_db_path empty for default shared database");
+		LogError("[CrossTalk]   hint: relative URIs resolve against the game process CWD; if this server's CWD differs from the game root (common with panels/daemons), set an absolute path: cross_talk_db_path \"file:/absolute/path/to/csgo/addons/sourcemod/data/crosstalk/shared.sq3\" (all servers must share the same file; check CWD: ls -l /proc/$(pgrep srcds_linux)/cwd)");
 		return;
 	}
 
