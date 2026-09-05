@@ -355,12 +355,25 @@ void CT_DB_PollNewMessages()
 	gB_Polling = true;
 	gI_PollingTicks = 0;
 
-	char query[512];
-	// 本服自身的消息由本地已显示，这里全取，渲染端跳过 server_id == 本服。
-	// 为简单与不丢消息，全部拉取；server_id 相同消息在 state.sp 渲染时跳过。
-	Format(query, sizeof(query),
-		"SELECT id, server_id, server_name, player_name, msg_type, content FROM messages WHERE id > %d ORDER BY id ASC LIMIT %d",
-		gI_LastReadId, CT_DB_MAX_QUERY_ROWS);
+	char query[768];
+	// 本服自身的消息本地已显示（聊天由引擎原生显示、!crall 由命令回显），
+	// SQL 层直接排除本服消息——渲染端 server_id 跳过保留作双保险。
+	// 这样即使 server_id 往返有差异（空格/大小写/时序），本服消息也不会被
+	// 拉回重复渲染（用户实测：!crall 本服聊天框出现两条相同行）。
+	if (gC_ServerId[0] != '\0')
+	{
+		char escServerId[128];
+		SQL_EscapeString(gH_DB, gC_ServerId, escServerId, sizeof(escServerId));
+		Format(query, sizeof(query),
+			"SELECT id, server_id, server_name, player_name, msg_type, content FROM messages WHERE id > %d AND server_id != '%s' ORDER BY id ASC LIMIT %d",
+			gI_LastReadId, escServerId, CT_DB_MAX_QUERY_ROWS);
+	}
+	else
+	{
+		Format(query, sizeof(query),
+			"SELECT id, server_id, server_name, player_name, msg_type, content FROM messages WHERE id > %d ORDER BY id ASC LIMIT %d",
+			gI_LastReadId, CT_DB_MAX_QUERY_ROWS);
+	}
 	SQL_TQuery(gH_DB, CT_DB_Callback_Poll, query);
 }
 
